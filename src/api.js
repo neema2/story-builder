@@ -46,13 +46,13 @@ ${nameSection}
 
 Fill in this template. Keep it SIMPLE, COHERENT, and AGE-APPROPRIATE for a ${age}-year-old. The story should make logical sense from beginning to end — no surreal or confusing elements.
 
-**The Protagonist:** ${charList} — give them ONE endearing personality trait (e.g., always curious, loves to help, a little shy but brave).
+**The Protagonist:** ${charList} — briefly note one small personality quirk for flavor (e.g., always hums, loves puddles), but keep this minor.
 
 **The Setting:** ${settingLabel} — describe it vividly but keep it grounded and easy for a ${age}-year-old to picture.
 
-**The Plot:** A clear, simple adventure: They want to [GOAL], but [PROBLEM] makes it tricky. The problem should be relatable and fun — not weird or abstract. There should be a satisfying solution.
+**The Lesson (THIS IS THE HEART OF THE STORY):** Pick ONE clear, simple lesson a ${age}-year-old can understand and remember. Examples: "it's okay to ask for help", "sharing makes things more fun", "being brave means trying even when you're scared", "everyone is good at something different", "being kind to others makes everyone happier".
 
-**The Lesson:** One simple theme a ${age}-year-old can understand (e.g., friendship, sharing, being brave, trying new things, kindness).
+**The Plot (must be DRIVEN by the lesson):** The characters want to [GOAL], but [PROBLEM] gets in the way. The PROBLEM should directly relate to the lesson — for example, if the lesson is about sharing, the problem is that someone won't share. The SOLUTION must come from the characters LEARNING the lesson. The resolution should make the child think: "Oh! That's why [lesson] is important!"
 
 **The Tone:** Choose one: [Warm and rhyming / Gently adventurous / Cozy bedtime / Playful and fun]. Pick what's best for age ${age}.
 
@@ -91,6 +91,7 @@ RULES:
 - The story must make LOGICAL SENSE — each page should follow naturally from the last
 - Keep it simple, warm, and easy to follow for a ${age}-year-old
 - Use vocabulary appropriate for age ${age}
+- THE LESSON IS THE MOST IMPORTANT PART: The problem in the story should come from NOT knowing the lesson. The solution should come from DISCOVERING the lesson. The second-to-last page should show the characters understanding the lesson. The final page should gently state or show the lesson so the child clearly understands the takeaway.
 ${nameInstruction}
 
 Format: [PAGE 1] text, [PAGE 2] text, etc. Output ONLY the ${totalPages} pages.`;
@@ -130,33 +131,82 @@ Format: [PAGE 1] text, [PAGE 2] text, etc. Output ONLY the ${totalPages} pages.`
     return pages;
 }
 
+// ----- Character Reference Sheet Generation (Pass 2.5) -----
+
+export async function generateCharacterSheet({ characters, artStylePrompt }) {
+    const charDescriptions = describeCharacters(characters);
+
+    const prompt = `You are a character designer for a children's picture book. I need you to create an EXACT, LOCKED-IN visual reference sheet for the following characters, rendered in a specific art style.
+
+CHARACTERS:
+${charDescriptions}
+
+ART STYLE: ${artStylePrompt}
+
+For EACH character, provide an ultra-detailed visual specification that an illustrator could follow to draw the EXACT same character every single time. Include:
+- Exact body shape, proportions, and size relative to the scene
+- Exact color palette (use specific color names like "warm honey-gold" not just "brown")
+- Facial features: eye shape, color, expression, mouth, nose
+- Clothing/accessories: every detail, pattern, and color
+- Distinguishing marks or unique features
+- Default pose and body language
+- How they look in the specified art style
+
+Be extremely specific — two different artists reading this should draw nearly identical characters.
+
+Output ONLY the character reference descriptions, one per character.`;
+
+    const sheet = await callGeminiText(prompt, { temperature: 0.3 });
+    console.log('🧠 Character Sheet (Pass 2.5):\n', sheet);
+    return sheet;
+}
+
 // ----- Illustration Generation (no text in image) -----
 
-export async function generateIllustration({ characters, setting, storyText, pageNumber, totalPages, artStylePrompt }) {
-    const charDescriptions = describeCharacters(characters);
+export async function generateIllustration({ characters, setting, storyText, pageNumber, totalPages, artStylePrompt, characterSheet, referenceImageBase64 }) {
+    const charDescriptions = characterSheet || describeCharacters(characters);
     const settingLabel = setting.label;
 
-    const prompt = `Create a children's picture book illustration for this scene:
+    const referenceInstruction = referenceImageBase64
+        ? `\nREFERENCE IMAGE PROVIDED: A reference illustration is attached. You MUST draw the characters with the EXACT SAME appearance, proportions, colors, and style as shown in the reference image. Match the art style precisely.`
+        : '';
+
+    const prompt = `CRITICAL RULE: This illustration must contain ABSOLUTELY NO text, words, letters, numbers, captions, titles, labels, watermarks, signatures, or writing of ANY kind anywhere in the image. This is a WORDLESS illustration — purely visual, zero text.
+
+Create a children's picture book illustration for this scene:
 
 "${storyText}"
 
-CHARACTERS (draw exactly as described):
+CHARACTER VISUAL REFERENCE (draw EXACTLY as described — same colors, proportions, features on every page):
 ${charDescriptions}
+${referenceInstruction}
 
 SETTING: ${settingLabel}
 
 ART STYLE: ${artStylePrompt}
 
-IMPORTANT:
+RULES:
 - Make the characters BIG, expressive, and the center of the scene
-- Characters must look IDENTICAL to their descriptions
+- Characters must look IDENTICAL to their reference descriptions on every single page
 - Fill the entire image with the illustration — no borders or margins
-- Do NOT include any text, words, letters, or writing in the image
+- ZERO text anywhere — no words, letters, numbers, signs, labels, or writing of any kind
 - The illustration should be colorful, warm, and full of detail
-- Capture the emotion and action described in the scene`;
+- Capture the emotion and action described in the scene
+
+FINAL REMINDER: The image must be completely FREE of any text, letters, or writing. Purely visual, no words at all.`;
 
     try {
-        return await callGeminiImage(prompt);
+        // Build reference image parts for multimodal input
+        let imageParts = null;
+        if (referenceImageBase64) {
+            // Extract the base64 data and mime type from the data URL
+            const match = referenceImageBase64.match(/^data:(.+?);base64,(.+)$/);
+            if (match) {
+                imageParts = [{ inlineData: { mimeType: match[1], data: match[2] } }];
+                console.log('📎 Reference image attached for page', pageNumber);
+            }
+        }
+        return await callGeminiImage(prompt, imageParts);
     } catch (err) {
         console.warn('Illustration generation failed:', err.message);
         return null;
@@ -227,9 +277,16 @@ async function callGeminiText(prompt, { temperature = 0.8 } = {}) {
 
 const IMAGE_MODELS = ['gemini-3-pro-image-preview', 'gemini-2.0-flash-exp-image-generation'];
 
-async function callGeminiImage(prompt) {
+async function callGeminiImage(prompt, referenceImageParts = null) {
     const key = getApiKey();
     if (!key) throw new Error('No API key set');
+
+    // Build the parts array: reference image(s) first, then the text prompt
+    const parts = [];
+    if (referenceImageParts) {
+        parts.push(...referenceImageParts);
+    }
+    parts.push({ text: prompt });
 
     let lastError;
     for (const model of IMAGE_MODELS) {
@@ -239,7 +296,7 @@ async function callGeminiImage(prompt) {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        contents: [{ parts: [{ text: prompt }] }],
+                        contents: [{ parts }],
                         generationConfig: { responseModalities: ['IMAGE', 'TEXT'] }
                     })
                 });
@@ -250,9 +307,9 @@ async function callGeminiImage(prompt) {
                 }
 
                 const data = await response.json();
-                const parts = data.candidates?.[0]?.content?.parts || [];
+                const responseParts = data.candidates?.[0]?.content?.parts || [];
 
-                for (const part of parts) {
+                for (const part of responseParts) {
                     if (part.inlineData) {
                         return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
                     }
